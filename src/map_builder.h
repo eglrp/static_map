@@ -10,8 +10,9 @@
 #include <pcl/filters/passthrough.h>
 #include <pcl/filters/statistical_outlier_removal.h>
 
-#include "RegistrationWithNDTandGICP.h"
+#include "registrators/ndt_gicp.h"
 #include "msg_conversion.h"
+#include "cloud_corrector.h"
 #include <mutex>
 #include <thread>
 #include <memory>
@@ -22,9 +23,11 @@
 #include <gtsam/navigation/CombinedImuFactor.h>
 #include <gtsam/navigation/ImuBias.h>
 
+#include "octomap_saver.h"
 #include "pose_graph.h"
-#include "visualization/visualizer.h"
+#include "submap.h"
 
+#include "common/thread_pool.h"
 
 namespace static_map
 {
@@ -41,17 +44,6 @@ struct FrontEndSettings
 struct BackEndSettings
 {
   int32_t reserved[20];
-};
-
-struct Submap
-{
-  int32_t trajectory_index;
-  int32_t index;
-  
-  bool finished = false;
-  pcl::PointCloud<pcl::PointXYZ>::Ptr cloud;
-  Eigen::Matrix4f trans_to_global;
-  Eigen::Matrix4f trans_to_next_submap;
 };
   
 class MapBuilder
@@ -97,10 +89,6 @@ public:
   
   void RunFinalOptimazation();
   
-  inline 
-  void SetVisualizer(depth_clustering::Visualizer *visualizer)
-  { visualizer_ = visualizer ;}
-  
   inline pcl::PointCloud<pcl::PointXYZ>::Ptr
   GetFinalPointcloud(){ return final_cloud_ ;}
   
@@ -142,6 +130,8 @@ private:
   std::shared_ptr<std::thread> imu_process_thread_;
   bool got_first_point_cloud_ = false;
   
+  front_end::CloudCorrector<pcl::PointXYZ> cloud_corrector_;
+  
   // imu preintergration
   gtsam::imuBias::ConstantBias bias_;
   gtsam::CombinedImuFactor::CombinedPreintegratedMeasurements 
@@ -155,10 +145,10 @@ private:
   std::vector<InformationMatrix> information_matrices_;
   front_end::RegistrationWithNDTandGICP<pcl::PointXYZ>::Ptr submap_marcher_;
   bool submap_thread_running_;
-  std::vector<Submap> submaps_;
+  std::vector<Submap<pcl::PointXYZ>> submaps_;
   std::shared_ptr<std::thread> submap_thread_;
   
-  depth_clustering::Visualizer* visualizer_ = NULL;
+  back_end::OctomapSaver<pcl::PointXYZ> octomap_saver_;
 };
   
 }

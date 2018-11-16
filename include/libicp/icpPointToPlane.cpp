@@ -25,8 +25,12 @@ Street, Fifth Floor, Boston, MA 02110-1301, USA
 #endif
 
 #include "icpPointToPlane.h"
+#include "ifpot_test.h"
+#include <ifopt/problem.h>
+#include <ifopt/ipopt_solver.h>
 
 using namespace std;
+using namespace ifopt;
 
 // Also see (3d part): "Linear Least-Squares Optimization for Point-to-Plane ICP Surface Registration" (Kok-Lim Low)
 double IcpPointToPlane::fitStep (double *T,const int32_t T_num,Matrix &R,Matrix &t,const std::vector<int32_t> &active) {
@@ -177,6 +181,33 @@ double IcpPointToPlane::fitStep (double *T,const int32_t T_num,Matrix &R,Matrix 
       A.val[i][5] = nz;
       b.val[i][0] = nx*dx+ny*dy+nz*dz-nx*sx-ny*sy-nz*sz;    
     }
+    
+//     Problem nlp;
+//     Eigen::MatrixXd npl_A;
+//     npl_A.resize(nact, 6);
+//     Eigen::MatrixXd npl_b;
+//     npl_b.resize( nact, 1 );
+//     for( int i = 0; i < nact; ++i )
+//     {
+//       npl_b(i,0) = b.val[i][0];
+//       for( int j = 0; j < 6; ++j )
+//         npl_A(i,j) = A.val[i][j];
+//     }
+//     
+//     std::cout << "variables" << std::endl;
+//     nlp.AddVariableSet  (std::make_shared<TransformVariables>());
+// //   nlp.AddConstraintSet(std::make_shared<ExConstraint>());
+//     nlp.AddCostSet      (std::make_shared<TransformCost>(npl_A,npl_b));
+// //   nlp.PrintCurrent();
+//     
+//     IpoptSolver ipopt;
+//     ipopt.SetOption("linear_solver", "mumps");
+//     ipopt.SetOption("jacobian_approximation", "exact");
+// 
+//     // 段错误
+//     ipopt.Solve(nlp);
+//     Eigen::VectorXd x = nlp.GetOptVariables()->GetValues();
+//     std::cout << x.transpose() << std::endl;
 
     // linear least square matrices
     Matrix A_ = ~A*A;
@@ -379,78 +410,85 @@ double* IcpPointToPlane::computeNormals (const int32_t num_neighbors,const doubl
 
 double IcpPointToPlane::getResidual( double *T,const int32_t T_num,const Matrix &R,const Matrix &t,const std::vector<int> &active )
 {
-	if(active.empty()) return 0;
-	int nact = active.size();
-	double residual = 0;
+  if(active.empty()) return 0;
+  int nact = active.size();
+  double residual = 0;
 
-	std::vector<float>         query(m_dim);
-	kdtree::KDTreeResultVector result;
+  std::vector<float>         query(m_dim);
+  kdtree::KDTreeResultVector result;
 
-	if (m_dim==2) {
-		// extract matrix and translation vector
-		double r00 = R.val[0][0]; double r01 = R.val[0][1];
-		double r10 = R.val[1][0]; double r11 = R.val[1][1];
-		double t0  = t.val[0][0]; double t1  = t.val[1][0];
-		for (int32_t i=0; i<nact; i++) {
-			// kd tree query + result
-			int32_t idx = active[i];
-			
-			// transform point according to R|t
-			double tx = r00*T[idx*2+0] + r01*T[idx*2+1] + t0;
-			double ty = r10*T[idx*2+0] + r11*T[idx*2+1] + t1;
-			query[0] = (float)tx;
-			query[1] = (float)ty;
+  if (m_dim==2) {
+    // extract matrix and translation vector
+    double r00 = R.val[0][0]; double r01 = R.val[0][1];
+    double r10 = R.val[1][0]; double r11 = R.val[1][1];
+    double t0  = t.val[0][0]; double t1  = t.val[1][0];
+    for (int32_t i=0; i<nact; i++) {
+      // kd tree query + result
+      int32_t idx = active[i];
+      
+      // transform point according to R|t
+      double tx = r00*T[idx*2+0] + r01*T[idx*2+1] + t0;
+      double ty = r10*T[idx*2+0] + r11*T[idx*2+1] + t1;
+      query[0] = (float)tx;
+      query[1] = (float)ty;
 
-			// search nearest neighbor
-			m_kd_tree->n_nearest(query,1,result);
-			// model point
-			double mx = m_kd_tree->the_data[result[0].idx][0];
-			double my = m_kd_tree->the_data[result[0].idx][1];
-			// model point normal
-			double nx = M_normal[result[0].idx*2+0];
-			double ny = M_normal[result[0].idx*2+1];
-			
-			residual += abs(nx * (mx-tx) + ny * (my-ty));
+      // search nearest neighbor
+      m_kd_tree->n_nearest(query,1,result);
+      // model point
+      double mx = m_kd_tree->the_data[result[0].idx][0];
+      double my = m_kd_tree->the_data[result[0].idx][1];
+      // model point normal
+      double nx = M_normal[result[0].idx*2+0];
+      double ny = M_normal[result[0].idx*2+1];
+      
+      residual += abs(nx * (mx-tx) + ny * (my-ty));
 
-		}
-		// dimensionality 3
-	} else {
-		// extract matrix and translation vector
-		double r00 = R.val[0][0]; double r01 = R.val[0][1]; double r02 = R.val[0][2];
-		double r10 = R.val[1][0]; double r11 = R.val[1][1]; double r12 = R.val[1][2];
-		double r20 = R.val[2][0]; double r21 = R.val[2][1]; double r22 = R.val[2][2];
-		double t0  = t.val[0][0]; double t1  = t.val[1][0]; double t2  = t.val[2][0];
-		for (int32_t i=0; i<nact; i++) {
-			// kd tree query + result
-			std::vector<float>         query(m_dim);
-			kdtree::KDTreeResultVector result;
-			// get index of active point
-			int32_t idx = active[i];
-			// transform point according to R|t
-			double tx = r00*T[idx*3+0] + r01*T[idx*3+1] + r02*T[idx*3+2] + t0;
-			double ty = r10*T[idx*3+0] + r11*T[idx*3+1] + r12*T[idx*3+2] + t1;
-			double tz = r20*T[idx*3+0] + r21*T[idx*3+1] + r22*T[idx*3+2] + t2;
-			query[0] = (float)tx;
-			query[1] = (float)ty;
-			query[2] = (float)tz;
-			// search nearest neighbor
-			m_kd_tree->n_nearest(query,1,result);
-			//
-			// model point
-			double mx = m_kd_tree->the_data[result[0].idx][0];
-			double my = m_kd_tree->the_data[result[0].idx][1];
-			double mz = m_kd_tree->the_data[result[0].idx][2];
+    }
+          // dimensionality 3
+  } else {
+    // extract matrix and translation vector
+    double r00 = R.val[0][0]; double r01 = R.val[0][1]; double r02 = R.val[0][2];
+    double r10 = R.val[1][0]; double r11 = R.val[1][1]; double r12 = R.val[1][2];
+    double r20 = R.val[2][0]; double r21 = R.val[2][1]; double r22 = R.val[2][2];
+    double t0  = t.val[0][0]; double t1  = t.val[1][0]; double t2  = t.val[2][0];
+    for (int32_t i=0; i<nact; i++) {
+      // kd tree query + result
+      std::vector<float>         query(m_dim);
+      kdtree::KDTreeResultVector result;
+      // get index of active point
+      int32_t idx = active[i];
+      // transform point according to R|t
+      double tx = r00*T[idx*3+0] + r01*T[idx*3+1] + r02*T[idx*3+2] + t0;
+      double ty = r10*T[idx*3+0] + r11*T[idx*3+1] + r12*T[idx*3+2] + t1;
+      double tz = r20*T[idx*3+0] + r21*T[idx*3+1] + r22*T[idx*3+2] + t2;
+      query[0] = (float)tx;
+      query[1] = (float)ty;
+      query[2] = (float)tz;
+      // search nearest neighbor
+      m_kd_tree->n_nearest(query,1,result);
+      //
+      // model point
+      double mx = m_kd_tree->the_data[result[0].idx][0];
+      double my = m_kd_tree->the_data[result[0].idx][1];
+      double mz = m_kd_tree->the_data[result[0].idx][2];
 
-			// model point normal
-			double nx = M_normal[result[0].idx*3+0];
-			double ny = M_normal[result[0].idx*3+1];
-			double nz = M_normal[result[0].idx*3+2];
-
-			residual += nx * (mx-tx) + ny * (my-ty) + nz * (mz-tz);
-		}
-	}
-	residual /= nact;
-	return residual;
+      // model point normal
+      double nx = M_normal[result[0].idx*3+0];
+      double ny = M_normal[result[0].idx*3+1];
+      double nz = M_normal[result[0].idx*3+2];
+      
+      // modified by liu.y.c 
+      // 用 l2-norm 代替,否则最后得到的误差有负数，会影响判断
+      Matrix E(1,3);
+      E.val[0][0] = mx-tx; E.val[0][1] = my-ty; E.val[0][2] = mz-tz;
+      Matrix N(3,1);
+      N.val[0][0] = nx; N.val[1][0] = ny; N.val[2][0] = nz;
+      residual += (E*N).l2norm();
+//       residual += nx * (mx-tx) + ny * (my-ty) + nz * (mz-tz);
+    }
+  }
+  residual /= nact;
+  return residual;
 }
 
 

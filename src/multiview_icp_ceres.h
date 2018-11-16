@@ -41,9 +41,9 @@ Eigen::Isometry3d pointToPoint_CeresAngleAxis(
   std::vector<Eigen::Vector3d> &src, std::vector<Eigen::Vector3d> &dst);
 
 //multiview
-void ceresOptimizer(std::vector< std::shared_ptr<Frame> >& frames, bool robust );
+void ceresOptimizer(std::vector< std::shared_ptr<Frame<pcl::PointXYZ>> >& frames, bool robust );
 void ceresOptimizer_ceresAngleAxis( 
-  std::vector< std::shared_ptr<Frame> >& frames, bool robust );
+  std::vector< std::shared_ptr<Frame<pcl::PointXYZ>> >& frames, bool robust );
 }
 
 namespace ICPCostFunctions

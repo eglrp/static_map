@@ -26,6 +26,7 @@ find_package(catkin REQUIRED COMPONENTS
   std_msgs
   pcl_ros
   pcl_conversions
+  ifopt
 )
 
 SET(CMAKE_MODULE_PATH
@@ -44,30 +45,35 @@ find_package(Threads REQUIRED)
 include_directories("/usr/include/eigen3")
 include_directories(${Boost_INCLUDE_DIR})
 include_directories(${GTSAM_INCLUDE_DIR})
+include_directories(${PCL_INCLUDE_DIRS})
 
-if(${DISTRO} MATCHES "14.04")
-  find_package(Qt4 REQUIRED COMPONENTS QtCore QtXml QtOpenGL QtGui QtMultimedia)
-  include(${QT_USE_FILE})
-  include_directories(${QT_INCLUDES})
-  set(MY_QT_LIBRARIES
-      Qt4::QtCore
-      Qt4::QtXml
-      Qt4::QtOpenGL
-      Qt4::QtGui)
-elseif(${DISTRO} MATCHES "16.04" OR ${DISTRO} MATCHES "18.04")
-  find_package(Qt5 REQUIRED COMPONENTS Core Xml OpenGL Gui Widgets)
-  include_directories(${Qt5Core_INCLUDE_DIRS}
-                      ${Qt5Xml_INCLUDE_DIRS}
-                      ${Qt5Gui_INCLUDE_DIRS}
-                      ${Qt5Widgets_INCLUDE_DIRS}
-                      ${Qt5OpenGL_INCLUDE_DIRS})
-  set(MY_QT_LIBRARIES
-      ${Qt5Widgets_LIBRARIES}
-      ${Qt5Core_LIBRARIES}
-      ${Qt5Gui_LIBRARIES}
-      ${Qt5Xml_LIBRARIES}
-      ${Qt5OpenGL_LIBRARIES})
-endif()
+## octomap 
+find_package(octomap REQUIRED)
+include_directories(${OCTOMAP_INCLUDE_DIRS})
+
+# if(${DISTRO} MATCHES "14.04")
+#   find_package(Qt4 REQUIRED COMPONENTS QtCore QtXml QtOpenGL QtGui QtMultimedia)
+#   include(${QT_USE_FILE})
+#   include_directories(${QT_INCLUDES})
+#   set(MY_QT_LIBRARIES
+#       Qt4::QtCore
+#       Qt4::QtXml
+#       Qt4::QtOpenGL
+#       Qt4::QtGui)
+# elseif(${DISTRO} MATCHES "16.04" OR ${DISTRO} MATCHES "18.04")
+#   find_package(Qt5 REQUIRED COMPONENTS Core Xml OpenGL Gui Widgets)
+#   include_directories(${Qt5Core_INCLUDE_DIRS}
+#                       ${Qt5Xml_INCLUDE_DIRS}
+#                       ${Qt5Gui_INCLUDE_DIRS}
+#                       ${Qt5Widgets_INCLUDE_DIRS}
+#                       ${Qt5OpenGL_INCLUDE_DIRS})
+#   set(MY_QT_LIBRARIES
+#       ${Qt5Widgets_LIBRARIES}
+#       ${Qt5Core_LIBRARIES}
+#       ${Qt5Gui_LIBRARIES}
+#       ${Qt5Xml_LIBRARIES}
+#       ${Qt5OpenGL_LIBRARIES})
+# endif()
 
 ## Uncomment this if the package has a setup.py. This macro ensures
 ## modules and global scripts declared therein get installed
@@ -170,6 +176,7 @@ add_definitions(-DNDT_USE_GPU)
 ## Your package locations should be listed before other locations
 include_directories(
   include
+  src
   ${catkin_INCLUDE_DIRS}
   ${CUDA_INCLUDE_DIRS}
   ${CERES_INCLUDE_DIR}
@@ -211,16 +218,16 @@ add_library(bbox
 target_link_libraries(bbox 
   cloud)
   
-find_package(QGLViewer REQUIRED)
-
-add_library(visualization SHARED 
-  ${DEPTH_CLUSTER_DIR}/visualization/visualizer.cpp)
-target_link_libraries(visualization
-                      identifiable
-                      ${QGLVIEWER_LIBRARY}
-                      ${OPENGL_gl_LIBRARY}
-                      ${MY_QT_LIBRARIES}
-                      ${OPENGL_glu_LIBRARY})
+# find_package(QGLViewer REQUIRED)
+# 
+# add_library(visualization SHARED 
+#   ${DEPTH_CLUSTER_DIR}/visualization/visualizer.cpp)
+# target_link_libraries(visualization
+#                       identifiable
+#                       ${QGLVIEWER_LIBRARY}
+#                       ${OPENGL_gl_LIBRARY}
+#                       ${MY_QT_LIBRARIES}
+#                       ${OPENGL_glu_LIBRARY})
 
 ## Add cmake target dependencies of the library
 ## as an example, code may need to be generated before libraries
@@ -230,29 +237,18 @@ target_link_libraries(visualization
 ## Declare a C++ executable
 ## With catkin_make all packages are built within a single CMake context
 ## The recommended prefix ensures that target names across packages don't collide
-set(srcs
-  src/main.cpp 
-  src/macro_defines.cc
-  src/map_builder.cc
-  src/msg_conversion.cc
-  src/pose_graph.cc
-  src/multiview_icp_ceres.cpp
-  src/frame.cc )
-  
-set(incs
-  include/RegistrationWithNDTandGICP.h
-  include/sensors.h
-  include/macro_defines.h
-  include/map_builder.h
-  include/msg_conversion.h
-  include/pose_graph.h
-  include/simple_time.h
-  include/frame.h
-  include/eigen_quaternion.h
-  include/multiview_icp_ceres.h
-  )
+# set(srcs
+#   src/main.cpp 
+#   src/macro_defines.cc
+#   src/map_builder.cc
+#   src/msg_conversion.cc
+#   src/pose_graph.cc
+#   src/multiview_icp_ceres.cc )
 
-add_executable(${PROJECT_NAME}_node ${srcs} ${incs})
+file(GLOB common_srcs "src/common/*.cc")
+file(GLOB srcs "src/*.cc")
+add_executable(${PROJECT_NAME}_node 
+  ${srcs} ${common_srcs})
 
 ## Rename C++ executable without prefix
 ## The above recommended prefix causes long target names, the following renames the
@@ -266,7 +262,7 @@ add_dependencies(${PROJECT_NAME}_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catk
 
 ## Specify libraries to link a library or executable target against
 set(depth_clustring_libs 
-  projections ground_remove cloud visualization)
+  projections ground_remove cloud)
 target_link_libraries(${PROJECT_NAME}_node
   ${catkin_LIBRARIES}
   icp
@@ -274,4 +270,5 @@ target_link_libraries(${PROJECT_NAME}_node
   gtsam
   ndt_gpu
   ${depth_clustring_libs}
+  ${OCTOMAP_LIBRARIES}
 )

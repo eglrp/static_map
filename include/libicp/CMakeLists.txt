@@ -6,9 +6,13 @@ project (libicp)
 set (LIBICP_SRC_DIR src)
 FIND_PATH(BOOST_DIR "boost")
 
+find_package(catkin REQUIRED COMPONENTS
+  ifopt
+)
+
 # include directory
 include_directories("${LIBICP_SRC_DIR}")
-include_directories("${BOOST_DIR}")
+include_directories("${BOOST_DIR}" ${catkin_INCLUDE_DIRS})
 
 # determine if OpenMP can/should be used
 option(USE_OPENMP "Enable OpenMP?" ON) # set to OFF to disable
@@ -31,4 +35,5 @@ set(CMAKE_BUILD_TYPE Release)
 
 # build demo program
 add_library(icp ${LIBICP_SRC_FILES})
+target_link_libraries(icp ${catkin_LIBRARIES})
 

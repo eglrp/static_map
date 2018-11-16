@@ -87,7 +87,7 @@ Isometry3d pointToPoint_EigenQuaternion( std::vector<Vector3d>&src,
     return eigenQuaternionToIso(q,t);
 }
 
-void ceresOptimizer( std::vector< std::shared_ptr<Frame> >& frames, bool robust)
+void ceresOptimizer( std::vector< std::shared_ptr<Frame<pcl::PointXYZ>> >& frames, bool robust)
 {
   ceres::Problem problem;
   std::vector<Eigen::Quaterniond> qs(frames.size());
@@ -106,7 +106,7 @@ void ceresOptimizer( std::vector< std::shared_ptr<Frame> >& frames, bool robust)
     ts[i]=t;
 
     if (i==0){
-      frames[i]->fixed=true;
+      frames[i]->fixed_=true;
     }
   }
 
@@ -118,8 +118,8 @@ void ceresOptimizer( std::vector< std::shared_ptr<Frame> >& frames, bool robust)
       new ceres::EigenQuaternionParameterization;
   //add edges
   for(int src_id = 0; src_id < frames.size(); src_id++){
-    Frame& src_frame = *frames[src_id];
-    if(src_frame.fixed) 
+    auto& src_frame = *frames[src_id];
+    if(src_frame.fixed_) 
       continue;
 
     Eigen::Quaterniond& srcQ = qs[src_id];
@@ -127,7 +127,7 @@ void ceresOptimizer( std::vector< std::shared_ptr<Frame> >& frames, bool robust)
     
     for (int j = 0; j < src_frame.neighbours.size(); ++j) {
       OutgoingEdge& dstEdge = src_frame.neighbours[j];
-      Frame& dst_frame = *frames.at(dstEdge.neighbourIdx);
+      auto& dst_frame = *frames.at(dstEdge.neighbourIdx);
 
       int dst_id = dstEdge.neighbourIdx;
 
@@ -158,7 +158,7 @@ void ceresOptimizer( std::vector< std::shared_ptr<Frame> >& frames, bool robust)
   
   std::cout << "add edge finished " << std::endl;
   for (int i = 0; i < frames.size(); ++i) {
-      if(frames[i]->fixed){
+      if(frames[i]->fixed_){
           std::cout<<i<<" fixed"<<endl;
           problem.SetParameterBlockConstant(qs[i].coeffs().data());
           problem.SetParameterBlockConstant(ts[i].data());

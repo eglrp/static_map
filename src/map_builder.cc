@@ -12,6 +12,8 @@
 #include "image_labelers/linear_image_labeler.h"
 #include "utils/cloud_saver.h"
 
+#include "back_end/m2dp.h"
+
 
 namespace static_map
 {
@@ -25,16 +27,20 @@ MapBuilder::MapBuilder()
   , imu_current_estimate_(bias_,
       gtsam::Matrix3::Zero(), gtsam::Matrix3::Zero(), gtsam::Matrix3::Zero(),
       gtsam::Matrix3::Zero(), gtsam::Matrix3::Zero(), gtsam::Matrix::Zero(6,6))
+  , octomap_saver_( 0.05 )
   {}
   
 int32_t MapBuilder::Initialise( FrontEndSettings& f_setting, 
                                 BackEndSettings& b_setting )
 {
   if( registration_ == nullptr )
+  {
     registration_ = boost::make_shared<
       front_end::RegistrationWithNDTandGICP<pcl::PointXYZ>>( 
         f_setting.search_window, f_setting.use_voxel_filter, 
         f_setting.voxel_filter_resolution );
+    registration_->enableNdt( false );
+  }
   else
   {
     PRINT_ERROR("Has been inited already.");
@@ -44,6 +50,7 @@ int32_t MapBuilder::Initialise( FrontEndSettings& f_setting,
   submap_marcher_ = boost::make_shared<
       front_end::RegistrationWithNDTandGICP<pcl::PointXYZ>>( 
         f_setting.search_window, false );
+  submap_marcher_->enableNdt( false );
   
   final_cloud_ = boost::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
   point_cloud_process_thread_ = std::make_shared<std::thread>(
@@ -79,12 +86,10 @@ void MapBuilder::PointcloudProcessing()
   pcl::PointCloud<pcl::PointXYZ>::Ptr output_cloud(
     new pcl::PointCloud<pcl::PointXYZ>);
   
-  Eigen::AngleAxisf init_rotation( 0 , Eigen::Vector3f::UnitZ());
-  Eigen::Translation3f init_translation(0, 0, 0);
-  Eigen::Matrix4f last_guess = (init_translation * init_rotation).matrix();
-  Eigen::Matrix4f final_transform = (init_translation * init_rotation).matrix();
+  Eigen::Matrix4f last_guess = Eigen::Matrix4f::Identity();
+  Eigen::Matrix4f final_transform = Eigen::Matrix4f::Identity();
+  Eigen::Matrix4f accumulative_transform = Eigen::Matrix4f::Identity();
   
-  gtsam::Rot3 last_rotation;
   bool last_match_is_good = true;
   while( true )
   {
@@ -125,52 +130,70 @@ void MapBuilder::PointcloudProcessing()
       continue;
     }
     
-    // down sample
-    DownSamplePointcloud( input_cloud, input_cloud_filtered, 80., -3., 3. );
-    DownSamplePointcloud( target_cloud, target_cloud_filtered, 80., -3., 3.);
-    registration_->setInputSource( input_cloud_filtered );
-    registration_->setInputTarget( target_cloud_filtered );
-    
     Eigen::Matrix4f align_result;
     Eigen::Matrix4f guess = last_guess;
     
-    double delta_yaw = 0.;
+    double linear_motion = last_guess.block(0,3,2,1).norm();
+//     double angle_motion = 0.;
     if( use_imu_ )
     { 
-      last_rotation = imu_current_estimate_.deltaRij();
+      gtsam::Rot3 last_rotation = imu_current_estimate_.deltaRij();
+      gtsam::Vector3 last_position = imu_current_estimate_.deltaPij();
       imu_estimate_on_time( sensors::ToLocalTime( input_cloud->header.stamp ) );
       
-      delta_yaw = imu_current_estimate_.deltaRij().yaw() - last_rotation.yaw();
+      double delta_yaw = imu_current_estimate_.deltaRij().yaw() - last_rotation.yaw();
+      double delta_translation = ( imu_current_estimate_.deltaPij() - last_position )
+        .block(0,0,2,1).norm();
+      
       Eigen::AngleAxisf delta_rotation( delta_yaw , Eigen::Vector3f::UnitZ() );
       guess.block(0, 0, 3, 3) = delta_rotation.matrix();
+      
+      linear_motion = ( linear_motion + delta_translation ) * 0.5;
+//       angle_motion = delta_yaw;
+      // TODO imu nums fix
     }
+    
+    
+//     cloud_corrector_.CorrectCloud( input_cloud, linear_motion, angle_motion);
+    // down sample
+    DownSamplePointcloud( input_cloud, input_cloud_filtered );
+    DownSamplePointcloud( target_cloud, target_cloud_filtered );
+    registration_->setInputSource( input_cloud_filtered );
+    registration_->setInputTarget( target_cloud_filtered );
     
     if( registration_->align( guess, align_result ) )
     {
       if( last_match_is_good )
+      {
         last_guess = align_result;
+        accumulative_transform *= align_result;
+      }
       else
-        last_guess = (init_translation * init_rotation).matrix();
+        last_guess = Eigen::Matrix4f::Identity();
+      
+//       std::cout << "current align:\n" << align_result << std::endl;
       
       double match_score = registration_->getFitnessScore();
+      
+      PRINT_DEBUG_FMT("linear_motion : %lf, score : %lf", linear_motion, match_score );
+      
       
       Eigen::Quaternionf q_quess = Eigen::Quaternionf( Eigen::Matrix3f( guess.block(0,0,3,3) ) );
       Eigen::Quaternionf q = Eigen::Quaternionf( Eigen::Matrix3f( align_result.block(0,0,3,3) ) );
       
-      double q_match_score = q.dot(q_quess) * 0.5;
+      double q_match_score = q.dot(q_quess);
       const double move_threshold = 0.15;
-      if( align_result.block(0,3,3,1).norm() > move_threshold ) 
-      {
+      if( accumulative_transform.block(0,3,3,1).norm() > move_threshold ) 
+      { 
         point_cloud_submap_mutex_.lock();
         point_clouds_for_submaps_.push_back( input_cloud );
         point_cloud_submap_mutex_.unlock();
 
-        final_transform *= align_result;
+        final_transform *= accumulative_transform;
         pcl::transformPointCloud(*input_cloud, *output_cloud, final_transform);
         *final_cloud_ += *output_cloud;
 
         InformationMatrix information = InformationMatrix::Identity();
-        const double t = 180. / M_PI;
         for( int i = 0; i < 6; ++i )
         {
           if( i < 3 )
@@ -180,18 +203,20 @@ void MapBuilder::PointcloudProcessing()
         }
         
         transform_submap_mutex_.lock();
-        transfroms_for_submaps_.push_back(align_result);
+        transfroms_for_submaps_.push_back(accumulative_transform);
         information_matrices_.push_back(information);
         transform_submap_mutex_.unlock();
         
-        target_cloud->clear();
-        *target_cloud = *input_cloud;
+        accumulative_transform = Eigen::Matrix4f::Identity();
       }
     }
     else
     {
       last_match_is_good = false;
     }
+    
+    target_cloud->clear();
+    *target_cloud = *input_cloud;
   }
   
   point_cloud_thread_running_ = false;
@@ -252,12 +277,22 @@ void MapBuilder::imu_estimate_on_time( SimpleTime stamp )
   if( used_imus.empty() )
     return;
   
+  PRINT_DEBUG_FMT("used imu count: %lu", used_imus.size());
+  bool time_debug = false;
+  if( used_imus.size() <= 8 )
+  {
+    std::cout << "times: " << std::endl; 
+    time_debug = true;
+  }
   for( auto& imu : used_imus )
   {
+    if( time_debug )
+      std::cout << imu->header.stamp.DebugString() << std::endl;
     gtsam::Vector3 acc(imu->linear_acceleration.x, imu->linear_acceleration.y, imu->linear_acceleration.z);
     gtsam::Vector3 angle_velocity(imu->angular_velocity.x, imu->angular_velocity.y, imu->angular_velocity.z);
     imu_current_estimate_.integrateMeasurement( acc, angle_velocity, 0.01 );
   }
+
 //   std::cout << imu_current_estimate_.deltaPij()[0] << ", " << imu_current_estimate_.deltaPij()[1] << ", " << imu_current_estimate_.deltaPij()[2] << std::endl;
 }
 
@@ -313,7 +348,8 @@ void MapBuilder::SubmapProcessing()
     new pcl::PointCloud<pcl::PointXYZ>);
   pcl::PointCloud<pcl::PointXYZ>::Ptr output_cloud(
     new pcl::PointCloud<pcl::PointXYZ>);
-  pcl::PassThrough<pcl::PointXYZ> pass;
+  pcl::PointCloud<pcl::PointXYZ>::Ptr final_cloud(
+    new pcl::PointCloud<pcl::PointXYZ>);
   
   back_end::Pose3d init_pose;
   init_pose.p << 0., 0., 0.;
@@ -385,104 +421,122 @@ void MapBuilder::SubmapProcessing()
     }
     
     // 添加新的 constraints
-    for( auto& cp : contraint_pairs )
-    {
-      back_end::Constraint3d new_constraint;
-      new_constraint.id_begin = cp.first;
-      new_constraint.id_end = cp.second;
-      new_constraint.information = Eigen::Matrix< double, 6, 6 >::Identity();
-      Eigen::Matrix4f trans = Eigen::Matrix4f::Identity();
-      if( cp.second == cp.first + 1 )
-      {
-        trans = local_transfroms[cp.first];
-        new_constraint.information = local_informations[cp.first];
-      }
-      else
-      {
-        // 先计算不相邻两个点云的预测变换矩阵
-        for( int i = cp.first; i < cp.second; ++i )
-          trans *= local_transfroms[i];
-        
-        // 过滤掉一些角度或者位移过大的匹配，因为有可能会造成失败
-        const double move_threshold = 1.5;
-        
-        if( trans.block(0,3,3,1).norm() > move_threshold ) 
-          continue;
-        
-        DownSamplePointcloud( local_point_clouds.at(cp.first), target_cloud_filtered );
-        DownSamplePointcloud( local_point_clouds.at(cp.second), input_cloud_filtered );
-        
-        submap_marcher_->setInputSource( input_cloud_filtered );
-        submap_marcher_->setInputTarget( target_cloud_filtered );
-        Eigen::Matrix4f result;
-        submap_marcher_->align( trans, result );
-        trans = result;
-
-        double match_score = submap_marcher_->getFitnessScore();
-        PRINT_DEBUG_FMT("contraint_pairs score: %lf", match_score );
-        if( match_score < 0.85 )
-          continue;
-        
-        InformationMatrix& information = new_constraint.information;
-        for( int i = 0; i < 6; ++i )
-        {
-          if( i < 3 )
-            information(i,i) = match_score;
-          else
-            information(i,i) = match_score/* * 0.5*/;
-        }
-        
-      }
-      new_constraint.t_be = ToPose( trans.cast<double>() );
-      constraints.push_back( new_constraint );
-    }
-
-    std::cout << "**** \n" << poses[4].q.x() << " " << poses[4].q.y()
-     << " " << poses[4].q.z() << " " << poses[4].q.w()<< std::endl;
+//     for( auto& cp : contraint_pairs )
+//     {
+//       back_end::Constraint3d new_constraint;
+//       new_constraint.id_begin = cp.first;
+//       new_constraint.id_end = cp.second;
+//       new_constraint.information = Eigen::Matrix< double, 6, 6 >::Identity();
+//       Eigen::Matrix4f trans = Eigen::Matrix4f::Identity();
+//       if( cp.second == cp.first + 1 )
+//       {
+//         trans = local_transfroms[cp.first];
+//         new_constraint.information = local_informations[cp.first];
+//       }
+//       else
+//       {
+//         // 先计算不相邻两个点云的预测变换矩阵
+//         for( int i = cp.first; i < cp.second; ++i )
+//           trans *= local_transfroms[i];
+//         
+//         // 过滤掉一些角度或者位移过大的匹配，因为有可能会造成失败
+//         const double move_threshold = 1.5;
+//         if( trans.block(0,3,3,1).norm() > move_threshold ) 
+//           continue;
+//         
+//         DownSamplePointcloud( local_point_clouds.at(cp.first), target_cloud_filtered );
+//         DownSamplePointcloud( local_point_clouds.at(cp.second), input_cloud_filtered );
+//         
+//         submap_marcher_->setInputSource( input_cloud_filtered );
+//         submap_marcher_->setInputTarget( target_cloud_filtered );
+//         Eigen::Matrix4f result;
+//         submap_marcher_->align( trans, result );
+//         trans = result;
+// 
+//         double match_score = submap_marcher_->getFitnessScore();
+//         PRINT_DEBUG_FMT("contraint_pairs score: %lf", match_score );
+//         if( match_score < 0.85 )
+//           continue;
+//         
+//         InformationMatrix& information = new_constraint.information;
+//         for( int i = 0; i < 6; ++i )
+//         {
+//           if( i < 3 )
+//             information(i,i) = match_score;
+//           else
+//             information(i,i) = match_score/* * 0.5*/;
+//         }
+//         
+//       }
+//       new_constraint.t_be = ToPose( trans.cast<double>() );
+//       constraints.push_back( new_constraint );
+//     }
+// 
 //     ceres::Problem problem;
 //     back_end::BuildOptimizationProblem(constraints, &poses, &problem);
 //     back_end::SolveOptimizationProblem(&problem);
-    std::cout << "==== \n" << poses[4].q.x() << " " << poses[4].q.y()
-     << " " << poses[4].q.z() << " " << poses[4].q.w()<< std::endl;
     
     submaps_.emplace_back();
     auto& submap = submaps_.back();
-    submap.index = submaps_.size() - 1;
-    submap.cloud = boost::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+    submap.setMaxFrameSize( (size_t)submap_cloud_count );
+    submap.id_.submap_index = submaps_.size() - 1;
+    
     for( int i = 0; i < poses.size(); ++i )
     {
       Eigen::Matrix4d transform = ToTransform( poses.at(i) );
-      pcl::transformPointCloud( *local_point_clouds.at(i), *output_cloud, transform );
-      *submap.cloud += *output_cloud;
+      submap.insertPointCloud( local_point_clouds.at(i), transform.cast<float>() );
     }
     
     submap.trans_to_next_submap =  
       ToTransform( poses[submap_cloud_count-1] ).cast<float>();
-    if( submap.index == 0 )
+    if( submap.id_.submap_index == 0 )
       submap.trans_to_global = Eigen::Matrix4f::Identity();
     else
     {
-      submap.trans_to_global = submaps_.at(submap.index-1).trans_to_global;
-      submap.trans_to_global *= submaps_.at(submap.index-1).trans_to_next_submap;
-      
-/*      
-      submap.trans_to_global = submaps_.at(submap.index-1).trans_to_global *
-        submaps_.at(submap.index-1).trans_to_next_submap;*/
+      submap.trans_to_global = submaps_.at(submap.id_.submap_index-1).trans_to_global *
+        submaps_.at(submap.id_.submap_index-1).trans_to_next_submap;
     }
         
-    std::string filename = "submap_" + std::to_string( submap.index ) + ".pcd";
-    pcl::io::savePCDFileASCII(filename, *submap.cloud);
+//     std::string filename = "submap_" + std::to_string( submap.index ) + ".pcd";
+//     pcl::io::savePCDFileASCII(filename, *submap.cloud);
+    if( !submap.full() )
+      PRINT_ERROR("wrong size");
     
-    if( submap.index == 15 )
+    back_end::M2dp<pcl::PointXYZ> m2dp[2];
+    for( int i = 0; i < 2; ++i )
+      m2dp[i].setInputCloud( local_point_clouds.at(i) );
+    
+    std::cout << "m2dp score: " << 
+      back_end::matchTwoM2dpDescriptors<pcl::PointXYZ>( m2dp[0].getFinalDescriptor(), m2dp[1].getFinalDescriptor() ) << std::endl;
+    
+    
+    if( submap.id_.submap_index > 0 )
     {
-      int test_cloud = 0;
-      for( auto& cloud : local_point_clouds )
-      {
-        std::string file = "test_cloud_" + std::to_string( test_cloud ) + ".pcd";
-        pcl::io::savePCDFileASCII(file, *cloud);
-        test_cloud++;
-      }
+      auto& last_submap = submaps_.at(submap.id_.submap_index-1);
+  
+      DownSamplePointcloud( last_submap.cloud, target_cloud_filtered );
+      DownSamplePointcloud( submap.cloud, input_cloud_filtered );
+      
+      submap_marcher_->setInputSource( input_cloud_filtered );
+      submap_marcher_->setInputTarget( target_cloud_filtered );
+      Eigen::Matrix4f guess = Eigen::Matrix4f::Identity();
+
+      submap_marcher_->align( last_submap.trans_to_next_submap, guess );
+      
+      double match_score = submap_marcher_->getFitnessScore();
+      
+      std::cout << "submap match score: " << match_score << std::endl;
+      last_submap.trans_to_next_submap = guess;
+
+      // 不管怎样，global都是要更新的，以为前面的 transfrom 可能更新过
+      submap.trans_to_global = last_submap.trans_to_global 
+        * last_submap.trans_to_next_submap;
     }
+    pcl::transformPointCloud( *submap.cloud, *output_cloud, submap.trans_to_global );
+    *final_cloud += *output_cloud;
+    
+    octomap_saver_.insertPointCloud( output_cloud, 
+      Eigen::Vector3d(submap.trans_to_global.block(0,3,3,1).cast<double>()));
     
     // 数据清理
     local_point_clouds.erase( local_point_clouds.begin(), 
@@ -494,11 +548,8 @@ void MapBuilder::SubmapProcessing()
     local_informations.clear();
   }
   
-  pcl::PointCloud<pcl::PointXYZ>::Ptr final_cloud(
-    new pcl::PointCloud<pcl::PointXYZ>);
-  
-  for( auto& submap : submaps_ )
-  { 
+//   for( auto& submap : submaps_ )
+//   { 
 //     // 对新建的 submap 重新做一次匹配，得到更好的结果后接入到最终的地图里面去
 //     if( submap.index > 0 )
 //     {
@@ -516,22 +567,22 @@ void MapBuilder::SubmapProcessing()
 //       double match_score = submap_marcher_->getFitnessScore();
 //       
 //       std::cout << "submap match score: " << match_score << std::endl;
-//       if( match_score > 0.9 )
-//       {
+// //       if( match_score > 0.9 )
+// //       {
 //         last_submap.trans_to_next_submap = guess;
-//       }
-//       else
-//       { // do nothing, remains the former transform 
-//         std::cout << "remains the former transform" << std::endl;
-//       }
-//       
+// //       }
+// //       else
+// //       { // do nothing, remains the former transform 
+// //         std::cout << "remains the former transform" << std::endl;
+// //       }
+// //       
 //       // 不管怎样，global都是要更新的，以为前面的 transfrom 可能更新过
 //       submap.trans_to_global = last_submap.trans_to_global 
 //         * last_submap.trans_to_next_submap;
 //     }
-    pcl::transformPointCloud( *submap.cloud, *output_cloud, submap.trans_to_global );
-    *final_cloud += *output_cloud;
-  }
+//     pcl::transformPointCloud( *submap.cloud, *output_cloud, submap.trans_to_global );
+//     *final_cloud += *output_cloud;
+//   }
   
   pcl::ApproximateVoxelGrid<pcl::PointXYZ> approximate_voxel_filter;
   approximate_voxel_filter.setLeafSize(0.1, 0.1, 0.1);
@@ -540,6 +591,8 @@ void MapBuilder::SubmapProcessing()
   approximate_voxel_filter.filter(*filtered_final_cloud);
   pcl::io::savePCDFileASCII("final_optimized.pcd", *filtered_final_cloud);
   
+//   octomap_saver_.writeToFile( "final_octo.ot" );
+  octomap_saver_.saveOccupanyPCD( "static.pcd", 0.55 );
   PRINT_INFO("submap thread exit.");
   submap_thread_running_ = false;
 }
@@ -590,7 +643,6 @@ void MapBuilder::RunFinalOptimazation()
   }
 }
 
-static int test = 0;
 void MapBuilder::DownSamplePointcloud( pcl::PointCloud<pcl::PointXYZ>::Ptr source, 
     pcl::PointCloud<pcl::PointXYZ>::Ptr output, 
     double xy_range, double z_negetive, double z_positive  )
@@ -613,19 +665,19 @@ void MapBuilder::DownSamplePointcloud( pcl::PointCloud<pcl::PointXYZ>::Ptr sourc
 //   range_cond->addComparison (pcl::FieldComparison<pcl::PointXYZ>::ConstPtr (new
 //     pcl::FieldComparison<pcl::PointXYZ> ("y", pcl::ComparisonOps::LT, xy_range)));
   
-  pcl::ConditionalRemoval<pcl::PointXYZ> condrem;//创建条件滤波器
-  condrem.setCondition (range_cond); //并用条件定义对象初始化            
-  condrem.setInputCloud (source);     //输入点云
-  condrem.setKeepOrganized(true);    //设置保持点云的结构
-  // 执行滤波
-  condrem.filter(*output); 
+//   pcl::ConditionalRemoval<pcl::PointXYZ> condrem;//创建条件滤波器
+//   condrem.setCondition (range_cond); //并用条件定义对象初始化            
+//   condrem.setInputCloud (source);     //输入点云
+//   condrem.setKeepOrganized(true);    //设置保持点云的结构
+//   // 执行滤波
+//   condrem.filter(*output); 
   
   // 统计滤波
-//   pcl::StatisticalOutlierRemoval<pcl::PointXYZ> sor;
-//   sor.setInputCloud ( source );
-//   sor.setMeanK ( 30 );                               
-//   sor.setStddevMulThresh ( 1. );                  
-//   sor.filter (*output); 
+  pcl::StatisticalOutlierRemoval<pcl::PointXYZ> sor;
+  sor.setInputCloud ( source );
+  sor.setMeanK ( 30 );                               
+  sor.setStddevMulThresh ( 1. );                  
+  sor.filter (*output); 
 //   
 //   if( test == 0 )
 //   {
@@ -700,15 +752,10 @@ void MapBuilder::DepthClustering( pcl::PointCloud< pcl::PointXYZ >::Ptr source,
 
   depth_ground_remover.AddClient(&clusterer);
   
-  if( visualizer_ )
-    clusterer.AddClient(visualizer_->object_clouds_client());
-  
   std::cout << "source size: " << source->size() << std::endl;
   
   auto cloud = Cloud::FromPcl( *source );
   cloud->InitProjection(*proj_params_ptr);
-  if( visualizer_ )
-   visualizer_->OnNewObjectReceived(*cloud, 0);
   depth_ground_remover.OnNewObjectReceived(*cloud, 0);
   
   output = cloud->ToPcl();

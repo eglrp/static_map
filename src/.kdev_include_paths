@@ -1,3 +1,5 @@
 /opt/ros/kinetic/include
 /usr/include/pcl-1.7
 /home/edward/catkin_ws/src/ndt_test/include
+/usr/include/eigen3
+/home/edward/catkin_ws/src/ndt_test/src

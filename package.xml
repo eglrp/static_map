@@ -57,6 +57,9 @@
   <exec_depend>std_msgs</exec_depend>
   <build_depend>libpcl-all-dev</build_depend>
   <exec_depend>libpcl-all</exec_depend>
+  <build_depend>octomap</build_depend>
+  <exec_depend>octomap</exec_depend>
+<!--  <depend>ifopt</depend>-->
 
 
   <!-- The export tag contains other, unspecified, tags -->

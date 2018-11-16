@@ -19,6 +19,9 @@
 #include <cmath>
 #include "macro_defines.h"
 
+namespace static_map
+{
+
 namespace front_end
 {
   
@@ -185,82 +188,47 @@ public:
     }
     
     PointCloudSourcePtr output_cloud(new PointCloudSource);
-    Eigen::Matrix4f ndt_guess;
-    ndt_.setInputSource(down_sampled_input_cloud_);
-    //设置点云配准目标
-    ndt_.setInputTarget(down_sampled_target_cloud_);
-#ifdef NDT_USE_GPU
-    ndt_.align( guess );
-#else
-    ndt_.align(*output_cloud, guess);
-#endif
     
-    double score = ndt_.getFitnessScore();
-    
-#ifdef NDT_USE_GPU
-    score /= 20;
-#endif
-
-    double good_score = 1000.;
-    if( score <= 0.8 )
+    Eigen::Matrix4f ndt_guess = guess;
+    double ndt_score = 0.9;
+    if( use_ndt_ )
     {
-      good_score = score;
+      ndt_.setInputSource(down_sampled_input_cloud_);
+      ndt_.setInputTarget(down_sampled_target_cloud_);
+      
+      #ifdef NDT_USE_GPU
+      ndt_.align( guess );
+      #else
+      ndt_.align(*output_cloud, guess);
+      #endif
+      
+      ndt_score = ndt_.getFitnessScore();
+      
+      #ifdef NDT_USE_GPU
+      ndt_score /= 20;
+      #endif
+
       ndt_guess = ndt_.getFinalTransformation();
     }
-    else
-    {
-      std::cout << "candidates loop ..." << std::endl;
-      for( int i = 0; i < ndt_candidates_.size(); ++i )
-      {
-        auto& candidate_guess = ndt_candidates_.at(i);
-
-        output_cloud->clear();
-#ifdef NDT_USE_GPU
-        ndt_.align( candidate_guess );
-#else
-        ndt_.align(*output_cloud, candidate_guess);
-#endif
-        
-        double score = ndt_.getFitnessScore() ;
-#ifdef NDT_USE_GPU
-        score /= 20;
-#endif
-        
-//         std::cout << "Normal Distributions Transform has converged:" << ndt_.hasConverged()
-//             << " score: " << score
-//             << " iteration num: "<< ndt_.getFinalNumIteration() << std::endl;
-            
-        if( score < good_score )
-        {
-          good_score = score;
-          ndt_guess = ndt_.getFinalTransformation();
-        }
-
-        if( score <= 0.8 )
-          break;
-      }
-    }
-      
-    if( good_score <= 0.8 )
+    
+    double icp_score = 10.;
+    Eigen::Matrix4f final_guess;
+    if( ndt_score <= 1. )
     {  
-//       start_clock();
-//       gicp_.setInputSource( down_sampled_input_cloud_ );
-//       gicp_.setInputTarget( down_sampled_target_cloud_ );
-//       gicp_.align(*output_cloud, ndt_guess);
-//       
-//       good_score = gicp_.getFitnessScore();
-//       Eigen::Matrix4f final_guess = gicp_.getFinalTransformation();
-//       
-//       std::cout << "align:\n" << final_guess << std::endl;
-//       final_guess(2,3) = 0.;
-//       result = final_guess;
-//       
-//       end_clock();
+      icp_score = ndt_score;
+#ifdef USE_PCL_GICP
       
-#if 1
-      // test for libicp
+      gicp_.setInputSource( down_sampled_input_cloud_ );
+      gicp_.setInputTarget( down_sampled_target_cloud_ );
+      gicp_.align(*output_cloud, ndt_guess);
       
-      start_clock();
+      icp_score = gicp_.getFitnessScore();
+      final_guess = gicp_.getFinalTransformation();
+      
+      final_guess(2,3) = 0.;     
+      
+#else
+      // libicp
       double* M = (double*)calloc(3*down_sampled_target_cloud_->size(),sizeof(double));
       double* T = (double*)calloc(3*down_sampled_input_cloud_->size(),sizeof(double));
       for( int i = 0; i < down_sampled_target_cloud_->size(); ++i )
@@ -288,9 +256,8 @@ public:
       t.val[2][0] = ndt_guess(2,3);
       
       IcpPointToPlane icp(M,down_sampled_target_cloud_->size(),3);
-      double residual = icp.fit(T,down_sampled_input_cloud_->size(),R,t,-1);
+      icp_score = icp.fit(T,down_sampled_input_cloud_->size(),R,t,0.1);
       
-      Eigen::Matrix4f final_guess;
       for( int i = 0; i < 3; ++i )
         for( int j = 0; j < 3; ++j )
           final_guess(i,j) = R.val[i][j];
@@ -302,18 +269,16 @@ public:
       }
       final_guess(3,3) = 1.;
       
-      std::cout << "icp align:\n" << final_guess << std::endl;
-      result = final_guess;
-      
-      end_clock();
 #endif
 
-      final_score_ = std::exp( -good_score );
+      final_score_ = std::exp( -icp_score );
+      result = final_guess;
       return true;
     }
     else 
     {
-      final_score_ = std::exp( -good_score );
+      result = guess;
+      final_score_ = std::exp( -icp_score );
       return false;
     }
     
@@ -322,6 +287,9 @@ public:
   
   inline 
   double getFitnessScore() { return final_score_; }
+  
+  inline
+  void enableNdt( bool use_ndt ){ use_ndt_ = use_ndt; }
   
 private:
 #ifdef NDT_USE_GPU
@@ -341,6 +309,7 @@ private:
   pcl::ApproximateVoxelGrid<PointType> approximate_voxel_filter_;
   double voxel_resolution_;
   bool using_voxel_filter_;
+  bool use_ndt_ = true;
   
   SearchWindow ndt_search_window_;
   std::vector<Eigen::Matrix4f> ndt_candidates_;
@@ -349,3 +318,4 @@ private:
 
 };
 }  // namespace front_end
+}  // namespace static_map
